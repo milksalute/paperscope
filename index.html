@@ -988,12 +988,8 @@
 
         // ===== Init =====
         document.addEventListener('DOMContentLoaded', () => {
-            // Set default dates to recent
-            const today = new Date();
-            const weekAgo = new Date(today);
-            weekAgo.setDate(weekAgo.getDate() - 7);
-            document.getElementById('filterDateFrom').value = formatDate(weekAgo);
-            document.getElementById('filterDateTo').value = formatDate(today);
+            // 不再设置默认日期范围，避免搜索范围太窄
+            // 用户可以手动选择日期范围来筛选
 
             // Update clock
             updateClock();
@@ -1005,10 +1001,10 @@
             });
 
             // Connection badge
-            updateConnectionBadge('ARXIV API', '#3dffa2');
+            updateConnectionBadge('ARXIV PROXY', '#3dffa2');
 
-            // Fetch today's count
-            fetchTodayCount();
+            // 暂时禁用 fetchTodayCount（会额外消耗 arXiv API 配额）
+            // fetchTodayCount();
         });
 
         function formatDate(date) {
@@ -1221,12 +1217,30 @@
 
             } catch (error) {
                 console.error('Search error:', error);
-                const hint = `<p style="margin-top:12px; font-size:13px; color:var(--fg-dim);">请检查网络连接后刷新页面重试</p>`;
+
+                // 针对 429 速率限制给出更友好的提示
+                let errorHint = '';
+                if (error.message.includes('速率限制') || error.message.includes('429')) {
+                    errorHint = `
+                        <div style="margin-top:16px; padding:16px; background:rgba(255,180,50,0.1); border-radius:8px; text-align:left;">
+                            <p style="font-size:14px; color:#ffb432; margin:0 0 8px 0;"><strong>arXiv API 请求频率限制</strong></p>
+                            <p style="font-size:13px; color:var(--fg-dim); margin:0 0 12px 0; line-height:1.6;">
+                                Cloudflare Workers 的出口 IP 被多个用户共享，可能触发 arXiv 的速率限制。
+                            </p>
+                            <p style="font-size:13px; color:var(--fg-dim); margin:0; line-height:1.6;">
+                                <strong>建议：</strong>等待 30-60 秒后重试，或尝试简化搜索条件。
+                            </p>
+                        </div>
+                    `;
+                } else {
+                    errorHint = `<p style="margin-top:12px; font-size:13px; color:var(--fg-dim);">请检查网络连接后刷新页面重试</p>`;
+                }
+
                 resultsSection.innerHTML = `
                     <div class="error-state">
                         <p>❌ 检索请求失败</p>
                         <p class="error-detail">${error.message}</p>
-                        ${hint}
+                        ${errorHint}
                     </div>
                 `;
             } finally {
