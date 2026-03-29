@@ -1022,8 +1022,18 @@
         }
 
         // ===== 网络请求 =====
-        // GitHub Pages 通过 HTTPS 提供 https://yourname.github.io
-        // arXiv API 完美支持来自正常 http/https Origin 的 CORS 请求
+        // arXiv API 不支持 CORS（不返回 Access-Control-Allow-Origin 头）
+        // 因此需要通过 Cloudflare Workers 代理转发请求
+        //
+        // 部署步骤：
+        // 1. 将 worker.js 部署到 Cloudflare Workers（免费）
+        // 2. 将获取到的 URL 填入下面的 API_PROXY_URL
+
+        // ⚠️ 部署后将下面的 URL 替换为你的 Cloudflare Workers 地址
+        const API_PROXY_URL = 'paperscope.lyh221342.workers.dev';
+
+        // 判断是否已配置代理（未配置时回退到直连 arXiv，可能在某些环境下仍能工作）
+        const useProxy = API_PROXY_URL !== 'YOUR_CLOUDFLARE_WORKER_URL';
 
         function updateConnectionBadge(text, color) {
             const badge = document.getElementById('connectionBadge');
@@ -1033,12 +1043,23 @@
             if (dot) dot.style.background = color;
         }
 
+        // 将 arXiv API URL 转换为通过代理的 URL
+        function proxyUrl(arxivUrl) {
+            if (!useProxy) return arxivUrl;
+            const url = new URL(arxivUrl);
+            // 保留路径和查询参数，去掉域名部分
+            const pathAndQuery = url.pathname + url.search;
+            return `${API_PROXY_URL}${pathAndQuery}`;
+        }
+
         async function smartFetch(url) {
-            updateConnectionBadge('ARXIV API', '#3dffa2');
+            const proxyedUrl = proxyUrl(url);
+            const mode = useProxy ? 'cors' : 'no-cors';
+            updateConnectionBadge(useProxy ? 'ARXIV PROXY' : 'ARXIV API', '#3dffa2');
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), 20000);
             try {
-                const resp = await fetch(url, { signal: ctrl.signal });
+                const resp = await fetch(proxyedUrl, { signal: ctrl.signal });
                 if (resp.ok) return resp;
                 if (resp.status === 429) throw new Error('arXiv API 速率限制，请稍后重试');
                 throw new Error(`arXiv API 返回错误: ${resp.status}`);
@@ -1413,7 +1434,8 @@
             try {
                 const today = new Date();
                 const dateStr = today.toISOString().split('T')[0].replace(/-/g, '');
-                const url = `https://export.arxiv.org/api/query?search_query=submittedDate:[${dateStr}0000 TO ${dateStr}2359]&max_results=0`;
+                const arxivUrl = `https://export.arxiv.org/api/query?search_query=submittedDate:[${dateStr}0000 TO ${dateStr}2359]&max_results=0`;
+                const url = proxyUrl(arxivUrl);
                 const resp = await fetch(url);
                 if (!resp.ok) return;
                 const text = await resp.text();
