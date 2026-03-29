@@ -1044,18 +1044,17 @@
         }
 
         // 将 arXiv API URL 转换为通过代理的 URL
+        // 使用 ?url= 参数传递目标地址（Cloudflare Worker 会从 query string 读取）
         function proxyUrl(arxivUrl) {
             if (!useProxy) return arxivUrl;
-            const url = new URL(arxivUrl);
-            // 保留路径和查询参数，去掉域名部分
-            const pathAndQuery = url.pathname + url.search;
-            return `${API_PROXY_URL}${pathAndQuery}`;
+            return `${API_PROXY_URL}/?url=${encodeURIComponent(arxivUrl)}`;
         }
 
         async function smartFetch(url) {
             const proxyedUrl = proxyUrl(url);
-            const mode = useProxy ? 'cors' : 'no-cors';
             updateConnectionBadge(useProxy ? 'ARXIV PROXY' : 'ARXIV API', '#3dffa2');
+            console.log('[DEBUG] Original arXiv URL:', url);
+            console.log('[DEBUG] Proxied URL:', proxyedUrl);
             const ctrl = new AbortController();
             const timer = setTimeout(() => ctrl.abort(), 20000);
             try {
@@ -1071,6 +1070,12 @@
         function buildArxivUrl(query, start, maxResults) {
             const encoded = encodeURIComponent(query);
             return `https://export.arxiv.org/api/query?search_query=${encoded}&start=${start}&max_results=${maxResults}&sortBy=submittedDate&sortOrder=descending`;
+        }
+
+        // ===== Debug =====
+        function logUrl(arxivUrl, proxyedUrl) {
+            console.log('[DEBUG] arXiv URL:', arxivUrl);
+            console.log('[DEBUG] Proxy URL:', proxyedUrl);
         }
 
         // ===== Build Query =====
@@ -1156,12 +1161,21 @@
                 if (!response.ok) throw new Error(`arXiv API 返回错误: ${response.status}`);
 
                 const text = await response.text();
+                console.log('[DEBUG] Response text (first 500 chars):', text.substring(0, 500));
                 const parser = new DOMParser();
                 const xml = parser.parseFromString(text, 'text/xml');
 
+                // Debug: check if XML parsed correctly
+                const parseError = xml.querySelector('parsererror');
+                if (parseError) {
+                    console.error('[DEBUG] XML parse error:', parseError.textContent);
+                }
+
                 // Parse results
                 const entries = xml.querySelectorAll('entry');
+                console.log('[DEBUG] Number of entries found:', entries.length);
                 const totalResultsEl = xml.querySelector('opensearch\\:totalResults, totalResults');
+                console.log('[DEBUG] totalResults element:', totalResultsEl ? totalResultsEl.textContent : 'NOT FOUND');
                 totalResults = totalResultsEl ? parseInt(totalResultsEl.textContent) : entries.length;
 
                 document.getElementById('statResults').textContent = totalResults.toLocaleString();
