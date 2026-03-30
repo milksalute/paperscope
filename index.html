@@ -986,6 +986,28 @@
         let totalResults = 0;
         let isLoading = false;
 
+        // ===== arXiv API 速率节流 =====
+        // arXiv 官方要求：每 3 秒最多 1 次请求（legacy 接口，单机单连接）
+        // 此处设置 3.5 秒间隔，留有余量，避免触发 429
+        const ARXIV_MIN_INTERVAL = 3500;
+        let lastApiCallTime = 0;
+        let pendingSearchResolve = null;
+
+        /**
+         * 等待足够间隔后再执行 API 请求
+         * 如果距离上次请求不足 ARXIV_MIN_INTERVAL，会等待剩余时间
+         */
+        function waitForRateLimit() {
+            const now = Date.now();
+            const elapsed = now - lastApiCallTime;
+            const waitMs = Math.max(0, ARXIV_MIN_INTERVAL - elapsed);
+            if (waitMs > 0) {
+                console.log(`[RateLimit] 等待 ${(waitMs / 1000).toFixed(1)}s 以遵守 arXiv API 速率限制...`);
+                return new Promise(resolve => setTimeout(resolve, waitMs));
+            }
+            return Promise.resolve();
+        }
+
         // ===== Init =====
         document.addEventListener('DOMContentLoaded', () => {
             // 不再设置默认日期范围，避免搜索范围太窄
@@ -1002,9 +1024,6 @@
 
             // Connection badge
             updateConnectionBadge('ARXIV PROXY', '#3dffa2');
-
-            // 暂时禁用 fetchTodayCount（会额外消耗 arXiv API 配额）
-            // fetchTodayCount();
         });
 
         function formatDate(date) {
@@ -1051,12 +1070,36 @@
             updateConnectionBadge(useProxy ? 'ARXIV PROXY' : 'ARXIV API', '#3dffa2');
             console.log('[DEBUG] Original arXiv URL:', url);
             console.log('[DEBUG] Proxied URL:', proxyedUrl);
+
+            // 等待速率限制间隔
+            await waitForRateLimit();
+            lastApiCallTime = Date.now();
+
             const ctrl = new AbortController();
-            const timer = setTimeout(() => ctrl.abort(), 20000);
+            const timer = setTimeout(() => ctrl.abort(), 25000); // 25 秒超时，给 Worker 节流留余量
             try {
                 const resp = await fetch(proxyedUrl, { signal: ctrl.signal });
+
+                // Worker 返回 429 → arXiv 限流，自动重试一次（等待后）
+                if (resp.status === 429) {
+                    console.warn('[RateLimit] 收到 429 响应，等待 5 秒后重试...');
+                    lastApiCallTime = Date.now() + 5000; // 推开下次允许时间
+                    await new Promise(r => setTimeout(r, 5000));
+                    lastApiCallTime = Date.now();
+
+                    const retryCtrl = new AbortController();
+                    const retryTimer = setTimeout(() => retryCtrl.abort(), 25000);
+                    try {
+                        const retryResp = await fetch(proxyedUrl, { signal: retryCtrl.signal });
+                        if (retryResp.ok) return retryResp;
+                        if (retryResp.status === 429) throw new Error('arXiv API 速率限制，请等待 30 秒后重试');
+                        throw new Error(`arXiv API 返回错误: ${retryResp.status}`);
+                    } finally {
+                        clearTimeout(retryTimer);
+                    }
+                }
+
                 if (resp.ok) return resp;
-                if (resp.status === 429) throw new Error('arXiv API 速率限制，请稍后重试');
                 throw new Error(`arXiv API 返回错误: ${resp.status}`);
             } finally {
                 clearTimeout(timer);
@@ -1146,7 +1189,7 @@
                 <div class="loading-container">
                     <div class="loading-spinner"></div>
                     <div class="loading-text">正在从 arXiv 检索论文，请稍候...</div>
-                    <div class="loading-text" style="font-size:12px; color:var(--fg-dim);">首次检索可能需要 5-10 秒</div>
+                    <div class="loading-text" style="font-size:12px; color:var(--fg-dim);">为遵守 arXiv API 使用规范，请求之间设有 3 秒间隔</div>
                 </div>
             `;
 
@@ -1192,10 +1235,8 @@
                         <div class="results-count">共找到 <strong>${totalResults.toLocaleString()}</strong> 篇论文，当前显示第 ${currentOffset + 1}-${Math.min(currentOffset + PAGE_SIZE, totalResults)} 篇</div>
                         <div class="results-sort">
                             <span>排序：</span>
-                            <select id="sortSelect" onchange="searchPapers()">
-                                <option value="submittedDate">提交时间</option>
-                                <option value="relevance">相关性</option>
-                                <option value="lastUpdatedDate">更新时间</option>
+                            <select id="sortSelect" disabled title="仅显示按提交时间排序的默认结果">
+                                <option value="submittedDate">提交时间（默认）</option>
                             </select>
                         </div>
                     </div>
@@ -1224,11 +1265,11 @@
                     errorHint = `
                         <div style="margin-top:16px; padding:16px; background:rgba(255,180,50,0.1); border-radius:8px; text-align:left;">
                             <p style="font-size:14px; color:#ffb432; margin:0 0 8px 0;"><strong>arXiv API 请求频率限制</strong></p>
-                            <p style="font-size:13px; color:var(--fg-dim); margin:0 0 12px 0; line-height:1.6;">
-                                Cloudflare Workers 的出口 IP 被多个用户共享，可能触发 arXiv 的速率限制。
+                            <p style="font-size:13px; color:var(--fg-dim); margin:0 0 8px 0; line-height:1.6;">
+                                arXiv 要求每 3 秒最多 1 次请求。由于 Cloudflare Workers 的出口 IP 被多用户共享，可能更容易触发此限制。
                             </p>
                             <p style="font-size:13px; color:var(--fg-dim); margin:0; line-height:1.6;">
-                                <strong>建议：</strong>等待 30-60 秒后重试，或尝试简化搜索条件。
+                                <strong>建议：</strong>等待 30 秒后再重试。系统已内置自动重试机制，首次 429 会自动等待 5 秒后重试一次。
                             </p>
                         </div>
                     `;
@@ -1457,26 +1498,6 @@
             }, 2500);
         }
 
-        // ===== Fetch today's paper count =====
-        async function fetchTodayCount() {
-            try {
-                const today = new Date();
-                const dateStr = today.toISOString().split('T')[0].replace(/-/g, '');
-                const arxivUrl = `https://export.arxiv.org/api/query?search_query=submittedDate:[${dateStr}0000 TO ${dateStr}2359]&max_results=0`;
-                const url = proxyUrl(arxivUrl);
-                const resp = await fetch(url);
-                if (!resp.ok) return;
-                const text = await resp.text();
-                const parser = new DOMParser();
-                const xml = parser.parseFromString(text, 'text/xml');
-                const total = xml.querySelector('opensearch\\:totalResults, totalResults');
-                if (total) {
-                    document.getElementById('statToday').textContent = parseInt(total.textContent).toLocaleString();
-                }
-            } catch (e) {
-                // silently ignore
-            }
-        }
     </script>
 </body>
 </html>
